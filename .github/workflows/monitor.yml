@@ -26,6 +26,7 @@ jobs:
         run: |
           cat > check.js <<'EOF'
           const { chromium } = require('playwright');
+          const https = require('https');
 
           (async () => {
             const browser = await chromium.launch({headless: true});
@@ -34,18 +35,44 @@ jobs:
             const url = 'https://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
 
             console.log('Opening Amazon Jobs...');
-            await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 60000});
-            await page.waitForTimeout(10000);
+            await page.goto(url, {
+              waitUntil: 'domcontentloaded',
+              timeout: 60000
+            });
+
+            await page.waitForTimeout(15000);
+
+            console.log('Reading Amazon job page...');
 
             const text = await page.locator('body').innerText();
 
-            console.log('Checking for Bolton...');
-            console.log(text.includes('Bolton') ? 'BOLTON FOUND' : 'NO BOLTON FOUND');
+            console.log('----- AMAZON PAGE TEXT -----');
+            console.log(text.substring(0, 15000));
+            console.log('----- END PAGE TEXT -----');
 
-            if (text.includes('Bolton')) {
-              const https = require('https');
+            const lower = text.toLowerCase();
 
-              const message = '🔔 AMAZON BOLTON JOB ALERT!\\n\\nA Bolton Amazon vacancy appears to be available.\\n\\nOpen Amazon Jobs to check and apply:\\nhttps://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
+            const bolton =
+              lower.includes('bolton') ||
+              lower.includes('bl3') ||
+              lower.includes('bl5');
+
+            const warehouse =
+              lower.includes('warehouse') ||
+              lower.includes('fulfillment') ||
+              lower.includes('fulfilment') ||
+              lower.includes('sortation');
+
+            console.log('Bolton/location detected:', bolton);
+            console.log('Warehouse job detected:', warehouse);
+
+            if (bolton && warehouse) {
+
+              const message =
+                '🔔 AMAZON BOLTON JOB ALERT!\\n\\n' +
+                'A possible Bolton Amazon warehouse vacancy has been detected.\\n\\n' +
+                'Check and apply yourself here:\\n' +
+                url;
 
               const data = new URLSearchParams({
                 chat_id: process.env.TELEGRAM_CHAT_ID,
@@ -62,12 +89,16 @@ jobs:
                 }
               });
 
+              req.on('error', err => {
+                console.log('Telegram error:', err.message);
+              });
+
               req.write(data);
               req.end();
 
-              console.log('Telegram alert sent.');
+              console.log('TELEGRAM ALERT SENT');
             } else {
-              console.log('No Bolton vacancy detected.');
+              console.log('NO BOLTON WAREHOUSE VACANCY DETECTED');
             }
 
             await browser.close();
