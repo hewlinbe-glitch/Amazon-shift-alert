@@ -1,201 +1,55 @@
-name: Amazon Bolton Job Monitor
+name: Amazon Bolton Diagnostic
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
-
-permissions:
-  contents: write
 
 jobs:
-  check-amazon:
+  check-feed:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Check Bolton Amazon alerts
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAMCHATID }}
+      - name: Check Amazon alert feed
         run: |
-          cat > check.js <<'EOF'
-          const fs = require('fs');
-          const https = require('https');
+          python - <<'PY'
+          import urllib.request
+          import re
+          import html
 
-          const FEED = 'https://t.me/s/amazonukjobsalert';
-          const LAST_FILE = '.last_bolton_alert';
+          url = "https://t.me/s/amazonukjobsalert"
 
-          function getPage(url) {
-            return new Promise((resolve, reject) => {
-              const req = https.get(url, {
-                headers: {
-                  'User-Agent': 'Mozilla/5.0'
-                }
-              }, res => {
-                let data = '';
+          print("Opening Amazon UK alert feed...")
 
-                res.on('data', chunk => data += chunk);
+          request = urllib.request.Request(
+              url,
+              headers={"User-Agent": "Mozilla/5.0"}
+          )
 
-                res.on('end', () => {
-                  if (res.statusCode >= 200 && res.statusCode < 300) {
-                    resolve(data);
-                  } else {
-                    reject(new Error(`HTTP ${res.statusCode}`));
-                  }
-                });
-              });
+          with urllib.request.urlopen(request, timeout=30) as response:
+              page = response.read().decode("utf-8", errors="ignore")
 
-              req.on('error', reject);
-              req.setTimeout(30000, () => {
-                req.destroy(new Error('Request timed out'));
-              });
-            });
-          }
+          print("Feed downloaded successfully.")
+          print("Feed size:", len(page), "characters")
 
-          function decodeHtml(text) {
-            return text
-              .replace(/&nbsp;/g, ' ')
-              .replace(/&amp;/g, '&')
-              .replace(/&quot;/g, '"')
-              .replace(/&#39;/g, "'")
-              .replace(/<br\s*\/?>/gi, '\n')
-              .replace(/<[^>]+>/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-          }
+          # Extract visible Telegram message text
+          messages = re.findall(
+              r'<div class="tgme_widget_message_text[^>]*>(.*?)</div>',
+              page,
+              re.S
+          )
 
-          function sendTelegram(message) {
-            return new Promise((resolve, reject) => {
-              const data = new URLSearchParams({
-                chat_id: process.env.TELEGRAM_CHAT_ID,
-                text: message
-              }).toString();
+          print("Messages found:", len(messages))
+          print("")
+          print("===== RECENT AMAZON ALERTS =====")
 
-              const req = https.request({
-                hostname: 'api.telegram.org',
-                path: `/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'Content-Length': Buffer.byteLength(data)
-                }
-              }, res => {
-                let body = '';
+          for i, message in enumerate(messages[-10:], 1):
+              text = re.sub(r'<[^>]+>', ' ', message)
+              text = html.unescape(text)
+              text = re.sub(r'\s+', ' ', text).strip()
 
-                res.on('data', chunk => body += chunk);
+              print("")
+              print(f"--- ALERT {i} ---")
+              print(text[:1500])
 
-                res.on('end', () => {
-                  if (res.statusCode >= 200 && res.statusCode < 300) {
-                    resolve(body);
-                  } else {
-                    reject(new Error(`Telegram HTTP ${res.statusCode}: ${body}`));
-                  }
-                });
-              });
-
-              req.on('error', reject);
-              req.write(data);
-              req.end();
-            });
-          }
-
-          (async () => {
-            console.log('Checking Amazon UK warehouse alert feed...');
-
-            const html = await getPage(FEED);
-
-            console.log('Feed downloaded successfully.');
-
-            // Split the public Telegram page into individual posts.
-            const posts = html.split('tgme_widget_message');
-
-            let found = null;
-
-            for (const post of posts) {
-              const text = decodeHtml(post);
-
-              if (!/Bolton/i.test(text)) continue;
-              if (!/Warehouse Operative|Warehouse|Sortation/i.test(text)) continue;
-
-              const jobMatch = post.match(
-                /https:\/\/www\.jobsatamazon\.co\.uk\/app#\/jobDetail\?jobId=[A-Za-z0-9_-]+/i
-              );
-
-              if (!jobMatch) continue;
-
-              const jobUrl = jobMatch[0];
-
-              const jobIdMatch = jobUrl.match(/jobId=([A-Za-z0-9_-]+)/i);
-              const jobId = jobIdMatch ? jobIdMatch[1] : jobUrl;
-
-              found = {
-                jobId,
-                jobUrl,
-                text: text.substring(0, 1200)
-              };
-
-              break;
-            }
-
-            if (!found) {
-              console.log('NO NEW BOLTON WAREHOUSE ALERT FOUND');
-              process.exit(0);
-            }
-
-            console.log('BOLTON WAREHOUSE ALERT FOUND');
-            console.log('Job ID:', found.jobId);
-            console.log('Job:', found.text);
-            console.log('Amazon link:', found.jobUrl);
-
-            let last = '';
-
-            if (fs.existsSync(LAST_FILE)) {
-              last = fs.readFileSync(LAST_FILE, 'utf8').trim();
-            }
-
-            if (last === found.jobId) {
-              console.log('This Bolton job was already sent to Telegram.');
-              process.exit(0);
-            }
-
-            const message =
-              '🔔 AMAZON BOLTON JOB ALERT!\\n\\n' +
-              '📍 Bolton, England\\n' +
-              '📦 Warehouse vacancy detected\\n\\n' +
-              'Open Amazon and check the vacancy now:\\n' +
-              found.jobUrl;
-
-            await sendTelegram(message);
-
-            console.log('TELEGRAM ALERT SENT');
-
-            fs.writeFileSync(LAST_FILE, found.jobId + '\\n');
-
-          })().catch(error => {
-            console.error('ERROR:', error.message);
-            process.exit(1);
-          });
-          EOF
-
-          node check.js
-
-      - name: Save last alert
-        run: |
-          if [ -f .last_bolton_alert ]; then
-            git config user.name "Amazon Shift Alert Bot"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-            git add .last_bolton_alert
-
-            if git diff --cached --quiet; then
-              echo "No new alert to save."
-            else
-              git commit -m "Update last Bolton Amazon alert"
-              git push
-            fi
-          fi
+          print("")
+          print("===== END =====")
+          PY
