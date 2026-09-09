@@ -1,12 +1,19 @@
 name: Amazon Job Monitor
 
 on:
-  push:
   workflow_dispatch:
 
 jobs:
-  test:
+  telegram-test:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Test bot
-        run: echo "Amazon Bolton monitor is working!"
+      - name: Send Telegram test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            --data-urlencode text="🔔 Amazon Shift Alert bot is connected successfully!"
