@@ -1,0 +1,12 @@
+name: Amazon Job Monitor
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test bot
+        run: echo "Amazon Bolton monitor is working!"
