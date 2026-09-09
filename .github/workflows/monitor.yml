@@ -2,78 +2,75 @@ name: Amazon Bolton Job Monitor
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
 
 jobs:
   check-amazon:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - name: Check repository
+        uses: actions/checkout@v4
         with:
-          node-version: 20
+          fetch-depth: 1
 
-      - name: Install Playwright
-        run: |
-          npm init -y
-          npm install playwright
-          npx playwright install --with-deps chromium
-
-      - name: Check Amazon Bolton jobs
+      - name: Check Bolton Amazon alerts
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAMCHATID }}
         run: |
           cat > check.js <<'EOF'
-          const { chromium } = require('playwright');
+          const fs = require('fs');
           const https = require('https');
 
-          (async () => {
-            const browser = await chromium.launch({headless: true});
-            const page = await browser.newPage();
+          const FEED = 'https://t.me/s/amazonukjobsalert';
+          const LAST_FILE = '.last_bolton_alert';
 
-            const url = 'https://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
+          function getPage(url) {
+            return new Promise((resolve, reject) => {
+              const req = https.get(url, {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0'
+                }
+              }, res => {
+                let data = '';
 
-            console.log('Opening Amazon Jobs...');
-            await page.goto(url, {
-              waitUntil: 'domcontentloaded',
-              timeout: 60000
+                res.on('data', chunk => data += chunk);
+
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(data);
+                  } else {
+                    reject(new Error(`HTTP ${res.statusCode}`));
+                  }
+                });
+              });
+
+              req.on('error', reject);
+              req.setTimeout(30000, () => {
+                req.destroy(new Error('Request timed out'));
+              });
             });
+          }
 
-            await page.waitForTimeout(15000);
+          function decodeHtml(text) {
+            return text
+              .replace(/&nbsp;/g, ' ')
+              .replace(/&amp;/g, '&')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/<br\s*\/?>/gi, '\n')
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
 
-            console.log('Reading Amazon job page...');
-
-            const text = await page.locator('body').innerText();
-
-            console.log('----- AMAZON PAGE TEXT -----');
-            console.log(text.substring(0, 15000));
-            console.log('----- END PAGE TEXT -----');
-
-            const lower = text.toLowerCase();
-
-            const bolton =
-              lower.includes('bolton') ||
-              lower.includes('bl3') ||
-              lower.includes('bl5');
-
-            const warehouse =
-              lower.includes('warehouse') ||
-              lower.includes('fulfillment') ||
-              lower.includes('fulfilment') ||
-              lower.includes('sortation');
-
-            console.log('Bolton/location detected:', bolton);
-            console.log('Warehouse job detected:', warehouse);
-
-            if (bolton && warehouse) {
-
-              const message =
-                '🔔 AMAZON BOLTON JOB ALERT!\\n\\n' +
-                'A possible Bolton Amazon warehouse vacancy has been detected.\\n\\n' +
-                'Check and apply yourself here:\\n' +
-                url;
-
+          function sendTelegram(message) {
+            return new Promise((resolve, reject) => {
               const data = new URLSearchParams({
                 chat_id: process.env.TELEGRAM_CHAT_ID,
                 text: message
@@ -87,22 +84,118 @@ jobs:
                   'Content-Type': 'application/x-www-form-urlencoded',
                   'Content-Length': Buffer.byteLength(data)
                 }
+              }, res => {
+                let body = '';
+
+                res.on('data', chunk => body += chunk);
+
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(body);
+                  } else {
+                    reject(new Error(`Telegram HTTP ${res.statusCode}: ${body}`));
+                  }
+                });
               });
 
-              req.on('error', err => {
-                console.log('Telegram error:', err.message);
-              });
-
+              req.on('error', reject);
               req.write(data);
               req.end();
+            });
+          }
 
-              console.log('TELEGRAM ALERT SENT');
-            } else {
-              console.log('NO BOLTON WAREHOUSE VACANCY DETECTED');
+          (async () => {
+            console.log('Checking Amazon UK warehouse alert feed...');
+
+            const html = await getPage(FEED);
+
+            console.log('Feed downloaded successfully.');
+
+            // Split the public Telegram page into individual posts.
+            const posts = html.split('tgme_widget_message');
+
+            let found = null;
+
+            for (const post of posts) {
+              const text = decodeHtml(post);
+
+              if (!/Bolton/i.test(text)) continue;
+              if (!/Warehouse Operative|Warehouse|Sortation/i.test(text)) continue;
+
+              const jobMatch = post.match(
+                /https:\/\/www\.jobsatamazon\.co\.uk\/app#\/jobDetail\?jobId=[A-Za-z0-9_-]+/i
+              );
+
+              if (!jobMatch) continue;
+
+              const jobUrl = jobMatch[0];
+
+              const jobIdMatch = jobUrl.match(/jobId=([A-Za-z0-9_-]+)/i);
+              const jobId = jobIdMatch ? jobIdMatch[1] : jobUrl;
+
+              found = {
+                jobId,
+                jobUrl,
+                text: text.substring(0, 1200)
+              };
+
+              break;
             }
 
-            await browser.close();
-          })();
+            if (!found) {
+              console.log('NO NEW BOLTON WAREHOUSE ALERT FOUND');
+              process.exit(0);
+            }
+
+            console.log('BOLTON WAREHOUSE ALERT FOUND');
+            console.log('Job ID:', found.jobId);
+            console.log('Job:', found.text);
+            console.log('Amazon link:', found.jobUrl);
+
+            let last = '';
+
+            if (fs.existsSync(LAST_FILE)) {
+              last = fs.readFileSync(LAST_FILE, 'utf8').trim();
+            }
+
+            if (last === found.jobId) {
+              console.log('This Bolton job was already sent to Telegram.');
+              process.exit(0);
+            }
+
+            const message =
+              '🔔 AMAZON BOLTON JOB ALERT!\\n\\n' +
+              '📍 Bolton, England\\n' +
+              '📦 Warehouse vacancy detected\\n\\n' +
+              'Open Amazon and check the vacancy now:\\n' +
+              found.jobUrl;
+
+            await sendTelegram(message);
+
+            console.log('TELEGRAM ALERT SENT');
+
+            fs.writeFileSync(LAST_FILE, found.jobId + '\\n');
+
+          })().catch(error => {
+            console.error('ERROR:', error.message);
+            process.exit(1);
+          });
           EOF
 
           node check.js
+
+      - name: Save last alert
+        run: |
+          if [ -f .last_bolton_alert ]; then
+            git config user.name "Amazon Shift Alert Bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add .last_bolton_alert
+
+            if git diff --cached --quiet; then
+              echo "No new alert to save."
+            else
+              git commit -m "Update last Bolton Amazon alert"
+              git push
+            fi
+          fi
