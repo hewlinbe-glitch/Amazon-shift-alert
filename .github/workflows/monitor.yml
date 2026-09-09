@@ -1,55 +1,306 @@
-name: Amazon Bolton Diagnostic
+name: Amazon Bolton Job Monitor
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/2 * * * *"
+
+permissions:
+  contents: write
 
 jobs:
-  check-feed:
+  check-amazon:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check Amazon alert feed
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Playwright
         run: |
-          python - <<'PY'
-          import urllib.request
-          import re
-          import html
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
 
-          url = "https://t.me/s/amazonukjobsalert"
+      - name: Check Amazon jobs
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAMCHATID }}
+        run: |
+          cat > check.js <<'EOF'
+          const { chromium } = require('playwright');
+          const https = require('https');
+          const fs = require('fs');
 
-          print("Opening Amazon UK alert feed...")
+          const AMAZON_URL =
+            'https://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
 
-          request = urllib.request.Request(
-              url,
-              headers={"User-Agent": "Mozilla/5.0"}
-          )
+          const ALERT_FILE = 'alerted_jobs.txt';
 
-          with urllib.request.urlopen(request, timeout=30) as response:
-              page = response.read().decode("utf-8", errors="ignore")
+          function loadAlertedJobs() {
+            if (!fs.existsSync(ALERT_FILE)) {
+              return new Set();
+            }
 
-          print("Feed downloaded successfully.")
-          print("Feed size:", len(page), "characters")
+            return new Set(
+              fs.readFileSync(ALERT_FILE, 'utf8')
+                .split('\n')
+                .map(x => x.trim())
+                .filter(Boolean)
+            );
+          }
 
-          # Extract visible Telegram message text
-          messages = re.findall(
-              r'<div class="tgme_widget_message_text[^>]*>(.*?)</div>',
-              page,
-              re.S
-          )
+          function saveAlertedJobs(set) {
+            const jobs = Array.from(set).slice(-500);
+            fs.writeFileSync(ALERT_FILE, jobs.join('\n') + '\n');
+          }
 
-          print("Messages found:", len(messages))
-          print("")
-          print("===== RECENT AMAZON ALERTS =====")
+          function sendTelegram(message) {
+            return new Promise((resolve, reject) => {
+              const data = new URLSearchParams({
+                chat_id: process.env.TELEGRAM_CHAT_ID,
+                text: message,
+                disable_web_page_preview: 'false'
+              }).toString();
 
-          for i, message in enumerate(messages[-10:], 1):
-              text = re.sub(r'<[^>]+>', ' ', message)
-              text = html.unescape(text)
-              text = re.sub(r'\s+', ' ', text).strip()
+              const req = https.request({
+                hostname: 'api.telegram.org',
+                path: `/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Content-Length': Buffer.byteLength(data)
+                }
+              }, res => {
+                let body = '';
 
-              print("")
-              print(f"--- ALERT {i} ---")
-              print(text[:1500])
+                res.on('data', chunk => {
+                  body += chunk;
+                });
 
-          print("")
-          print("===== END =====")
-          PY
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    console.log('Telegram alert sent successfully.');
+                    resolve();
+                  } else {
+                    reject(new Error(`Telegram error ${res.statusCode}: ${body}`));
+                  }
+                });
+              });
+
+              req.on('error', reject);
+              req.write(data);
+              req.end();
+            });
+          }
+
+          function extractJobId(url) {
+            const match = url.match(/jobId=([^&]+)/i);
+            return match ? match[1] : null;
+          }
+
+          (async () => {
+            console.log('Starting Amazon Bolton monitor...');
+
+            const alertedJobs = loadAlertedJobs();
+
+            const browser = await chromium.launch({
+              headless: true
+            });
+
+            const page = await browser.newPage({
+              viewport: {
+                width: 1280,
+                height: 900
+              },
+              userAgent:
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+            });
+
+            try {
+              console.log('Opening Amazon Jobs...');
+
+              await page.goto(AMAZON_URL, {
+                waitUntil: 'domcontentloaded',
+                timeout: 60000
+              });
+
+              await page.waitForTimeout(10000);
+
+              const bodyText = await page.locator('body').innerText();
+
+              console.log('Amazon page loaded.');
+              console.log('Page length:', bodyText.length);
+
+              if (
+                bodyText.includes('403 ERROR') ||
+                bodyText.includes('Request blocked')
+              ) {
+                console.log('Amazon blocked this request.');
+                console.log('No alert sent.');
+                return;
+              }
+
+              /*
+               * Look for job links on the page.
+               */
+              const links = await page.locator('a').evaluateAll(anchors =>
+                anchors.map(a => ({
+                  text: (a.innerText || '').trim(),
+                  href: a.href || ''
+                }))
+              );
+
+              console.log('Links found:', links.length);
+
+              const jobLinks = links.filter(x =>
+                x.href.includes('jobDetail?jobId=')
+              );
+
+              console.log('Amazon job links found:', jobLinks.length);
+
+              const foundJobs = new Map();
+
+              for (const link of jobLinks) {
+                const jobId = extractJobId(link.href);
+
+                if (!jobId) continue;
+
+                if (!foundJobs.has(jobId)) {
+                  foundJobs.set(jobId, {
+                    jobId,
+                    href: link.href,
+                    text: link.text
+                  });
+                }
+              }
+
+              /*
+               * Also check the complete page text for Bolton.
+               */
+              const lowerText = bodyText.toLowerCase();
+
+              const boltonMentioned =
+                lowerText.includes('bolton') ||
+                /\bbl[1-7]\b/i.test(bodyText);
+
+              console.log('Bolton mentioned:', boltonMentioned);
+
+              if (!boltonMentioned) {
+                console.log('No Bolton vacancy detected.');
+                return;
+              }
+
+              /*
+               * Bolton-only filtering.
+               *
+               * We require:
+               *   Bolton OR a BL1-BL7 postcode
+               *
+               * and:
+               *   warehouse / fulfilment / sortation
+               */
+              const warehouseWords = [
+                'warehouse associate',
+                'warehouse operative',
+                'delivery station warehouse associate',
+                'fulfilment centre warehouse associate',
+                'fulfillment center warehouse associate',
+                'sortation operative',
+                'sortation associate',
+                'fulfilment',
+                'fulfillment',
+                'warehouse'
+              ];
+
+              /*
+               * The page can contain several jobs, so inspect text around
+               * each job link where possible.
+               */
+              let newAlerts = 0;
+
+              for (const [jobId, job] of foundJobs) {
+                const jobText = job.text.toLowerCase();
+
+                /*
+                 * Get a little surrounding text from the page.
+                 */
+                let surroundingText = bodyText.toLowerCase();
+
+                const warehouseJob =
+                  warehouseWords.some(word =>
+                    jobText.includes(word)
+                  ) ||
+                  warehouseWords.some(word =>
+                    surroundingText.includes(word)
+                  );
+
+                const boltonJob =
+                  surroundingText.includes('bolton') ||
+                  /\bbl[1-7]\b/i.test(surroundingText);
+
+                if (!warehouseJob || !boltonJob) {
+                  continue;
+                }
+
+                if (alertedJobs.has(jobId)) {
+                  console.log(`Already alerted: ${jobId}`);
+                  continue;
+                }
+
+                console.log(`NEW BOLTON JOB: ${jobId}`);
+
+                const message =
+                  '🔔 AMAZON BOLTON JOB ALERT!\n\n' +
+                  '📍 Bolton / BL postcode area\n' +
+                  '🏭 Amazon warehouse vacancy detected\n\n' +
+                  `🆔 Job ID: ${jobId}\n\n` +
+                  '🔗 Open the Amazon job:\n' +
+                  job.href +
+                  '\n\n' +
+                  '⚠️ Check the vacancy immediately — Amazon shifts can disappear very quickly.\n\n' +
+                  '👤 Apply/select the shift yourself.';
+
+                await sendTelegram(message);
+
+                alertedJobs.add(jobId);
+                newAlerts++;
+              }
+
+              saveAlertedJobs(alertedJobs);
+
+              console.log(`New alerts sent: ${newAlerts}`);
+
+            } finally {
+              await browser.close();
+            }
+          })().catch(error => {
+            console.error('Monitor failed:', error);
+            process.exit(1);
+          });
+          EOF
+
+          node check.js
+
+      - name: Save alerted job IDs
+        run: |
+          if [ -f alerted_jobs.txt ]; then
+            git config user.name "amazon-shift-alert-bot"
+            git config user.email "actions@github.com"
+
+            git add alerted_jobs.txt
+
+            if git diff --cached --quiet; then
+              echo "No new alert IDs to save."
+            else
+              git commit -m "Update alerted Amazon job IDs"
+              git push
+            fi
+          fi
