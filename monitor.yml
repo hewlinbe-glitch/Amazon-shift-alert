@@ -10,8 +10,8 @@ jobs:
     steps:
       - name: Check Telegram connection
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAMCHATID }}
         run: |
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
             echo "ERROR: TELEGRAM_BOT_TOKEN is empty"
