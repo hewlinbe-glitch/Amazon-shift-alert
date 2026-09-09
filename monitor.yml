@@ -1,77 +1,55 @@
-name: Amazon Bolton Job Monitor
+name: Amazon Bolton Diagnostic
 
 on:
   workflow_dispatch:
 
 jobs:
-  check-amazon:
+  check-feed:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install Playwright
+      - name: Check Amazon alert feed
         run: |
-          npm init -y
-          npm install playwright
-          npx playwright install --with-deps chromium
+          python - <<'PY'
+          import urllib.request
+          import re
+          import html
 
-      - name: Check Amazon Bolton jobs
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAMCHATID }}
-        run: |
-          cat > check.js <<'EOF'
-          const { chromium } = require('playwright');
+          url = "https://t.me/s/amazonukjobsalert"
 
-          (async () => {
-            const browser = await chromium.launch({headless: true});
-            const page = await browser.newPage();
+          print("Opening Amazon UK alert feed...")
 
-            const url = 'https://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
+          request = urllib.request.Request(
+              url,
+              headers={"User-Agent": "Mozilla/5.0"}
+          )
 
-            console.log('Opening Amazon Jobs...');
-            await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 60000});
-            await page.waitForTimeout(10000);
+          with urllib.request.urlopen(request, timeout=30) as response:
+              page = response.read().decode("utf-8", errors="ignore")
 
-            const text = await page.locator('body').innerText();
+          print("Feed downloaded successfully.")
+          print("Feed size:", len(page), "characters")
 
-            console.log('Checking for Bolton...');
-            console.log(text.includes('Bolton') ? 'BOLTON FOUND' : 'NO BOLTON FOUND');
+          # Extract visible Telegram message text
+          messages = re.findall(
+              r'<div class="tgme_widget_message_text[^>]*>(.*?)</div>',
+              page,
+              re.S
+          )
 
-            if (text.includes('Bolton')) {
-              const https = require('https');
+          print("Messages found:", len(messages))
+          print("")
+          print("===== RECENT AMAZON ALERTS =====")
 
-              const message = '🔔 AMAZON BOLTON JOB ALERT!\\n\\nA Bolton Amazon vacancy appears to be available.\\n\\nOpen Amazon Jobs to check and apply:\\nhttps://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
+          for i, message in enumerate(messages[-10:], 1):
+              text = re.sub(r'<[^>]+>', ' ', message)
+              text = html.unescape(text)
+              text = re.sub(r'\s+', ' ', text).strip()
 
-              const data = new URLSearchParams({
-                chat_id: process.env.TELEGRAM_CHAT_ID,
-                text: message
-              }).toString();
+              print("")
+              print(f"--- ALERT {i} ---")
+              print(text[:1500])
 
-              const req = https.request({
-                hostname: 'api.telegram.org',
-                path: `/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'Content-Length': Buffer.byteLength(data)
-                }
-              });
-
-              req.write(data);
-              req.end();
-
-              console.log('Telegram alert sent.');
-            } else {
-              console.log('No Bolton vacancy detected.');
-            }
-
-            await browser.close();
-          })();
-          EOF
-
-          node check.js
+          print("")
+          print("===== END =====")
+          PY
