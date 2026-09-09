@@ -8,21 +8,70 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check Amazon Bolton jobs
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Playwright
         run: |
-          echo "🔎 Checking Amazon jobs for Bolton..."
-          curl -L -s "https://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB" \
-            -o amazon.html
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
 
-          echo "Checking page..."
-          grep -i -o "Bolton" amazon.html | head || true
-
-      - name: Send Telegram test
+      - name: Check Amazon Bolton jobs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAMBOTTOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAMCHATID }}
         run: |
-          curl -s -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=🔎 Amazon Bolton monitor has started checking for jobs."
+          cat > check.js <<'EOF'
+          const { chromium } = require('playwright');
+
+          (async () => {
+            const browser = await chromium.launch({headless: true});
+            const page = await browser.newPage();
+
+            const url = 'https://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
+
+            console.log('Opening Amazon Jobs...');
+            await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 60000});
+            await page.waitForTimeout(10000);
+
+            const text = await page.locator('body').innerText();
+
+            console.log('Checking for Bolton...');
+            console.log(text.includes('Bolton') ? 'BOLTON FOUND' : 'NO BOLTON FOUND');
+
+            if (text.includes('Bolton')) {
+              const https = require('https');
+
+              const message = '🔔 AMAZON BOLTON JOB ALERT!\\n\\nA Bolton Amazon vacancy appears to be available.\\n\\nOpen Amazon Jobs to check and apply:\\nhttps://www.jobsatamazon.co.uk/app#/jobSearch?query=Warehouse%20Associate&locale=en-GB';
+
+              const data = new URLSearchParams({
+                chat_id: process.env.TELEGRAM_CHAT_ID,
+                text: message
+              }).toString();
+
+              const req = https.request({
+                hostname: 'api.telegram.org',
+                path: `/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Content-Length': Buffer.byteLength(data)
+                }
+              });
+
+              req.write(data);
+              req.end();
+
+              console.log('Telegram alert sent.');
+            } else {
+              console.log('No Bolton vacancy detected.');
+            }
+
+            await browser.close();
+          })();
+          EOF
+
+          node check.js
